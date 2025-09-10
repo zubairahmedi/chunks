@@ -9,7 +9,38 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 app = FastAPI()
 
-def extract_and_clean_products(xml_string: str) -> list[dict]:
+def clean_html_and_get_text(html_content):
+    """Safely cleans HTML and returns plain text."""
+    if not html_content or not isinstance(html_content, str):
+        return ""
+    soup = BeautifulSoup(html_content, 'lxml')
+    return soup.get_text(separator=' ', strip=True)
+
+def element_to_dict(element):
+    """
+    Recursively converts an XML element and its children into a clean dictionary.
+    This version correctly handles nested tags and lists.
+    """
+    # Base case: If the element has no children, return its cleaned text
+    if not list(element):
+        return clean_html_and_get_text(element.text)
+
+    # Recursive step: Process child elements
+    result = {}
+    for child in element:
+        child_data = element_to_dict(child)
+        
+        # If the tag name already exists, we have a list of items
+        if child.tag in result:
+            if not isinstance(result[child.tag], list):
+                result[child.tag] = [result[child.tag]]  # Convert existing item to a list
+            result[child.tag].append(child_data)
+        else:
+            result[child.tag] = child_data
+            
+    return result
+
+def extract_all_available_products(xml_string: str) -> list[dict]:
     """
     Processes a raw XML string to extract, clean, and filter product data.
     """
@@ -20,37 +51,19 @@ def extract_and_clean_products(xml_string: str) -> list[dict]:
         all_products = tree.xpath('//product')
         logging.info(f"Found {len(all_products)} total products to process.")
         
-        clean_products = []
+        available_products_data = []
         for product in all_products:
+            # 1. Filter: Check if the product is available
             availability_node = product.find('Availability')
             if availability_node is None or not (availability_node.text and availability_node.text.strip().lower() == 'yes'):
-                continue
+                continue # Skip to the next product if not available
 
-            name_node = product.find('FranchiseName')
-            short_desc_node = product.find('ShortDescription')
-            detailed_desc_node = product.find('DetailedDescription')
-            
-            name = name_node.text if name_node is not None else ""
-            
-            # --- THIS IS THE PART THAT HAS BEEN FIXED ---
-            # Using 'or ""' provides a safe default if the tag is empty (text is None)
-            short_desc_html = short_desc_node.text or ""
-            detailed_desc_html = detailed_desc_node.text or ""
-
-            # Clean the descriptions using BeautifulSoup
-            short_desc_text = BeautifulSoup(short_desc_html, 'lxml').get_text(separator=' ', strip=True)
-            detailed_desc_text = BeautifulSoup(detailed_desc_html, 'lxml').get_text(separator=' ', strip=True)
-            
-            full_description = f"{short_desc_text} {detailed_desc_text}".strip()
-
-            if name and full_description:
-                clean_products.append({
-                    "name": name.strip(),
-                    "description": full_description
-                })
+            # 2. Convert the entire <product> element into a clean dictionary
+            product_dict = element_to_dict(product)
+            available_products_data.append(product_dict)
                     
-        logging.info(f"Returning {len(clean_products)} clean and available products.")
-        return clean_products
+        logging.info(f"Returning full data for {len(available_products_data)} clean and available products.")
+        return available_products_data
         
     except Exception as e:
         logging.error(f"XML Processing Error: {e}")
@@ -65,14 +78,16 @@ def read_root():
 @app.post("/chunk")
 async def process_data(request: Request):
     """
-    This endpoint receives raw XML, filters it, cleans it, extracts key fields,
-    and returns a simple JSON array of objects.
+    This endpoint receives raw XML, filters it, cleans it, and returns
+    a full but structured JSON object for each available product.
     """
     logging.info("--- New request received ---")
     
     body = await request.body()
     raw_text = body.decode('utf-8', errors='ignore')
     
-    clean_product_list = extract_and_clean_products(raw_text)
+    # Process, filter, and extract all data from the XML
+    clean_product_list = extract_all_available_products(raw_text)
     
+    # Return the final, clean list of full product objects
     return {"products": clean_product_list}
